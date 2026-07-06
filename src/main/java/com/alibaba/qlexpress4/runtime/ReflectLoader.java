@@ -51,11 +51,12 @@ public class ReflectLoader {
         new CopyOnWriteArrayList<>(Arrays.asList(FilterExtensionFunction.INSTANCE, MapExtensionFunction.INSTANCE));
 
     /**
-     * Custom field-access handlers registered by the user, keyed by their binding class
-     * (e.g. Flink Row, JDBC ResultSet or other non-standard containers). A handler is
-     * invoked only when the bean is assignable to its binding class.
+     * Custom field-access handlers registered by the user. Each entry binds a handler to a
+     * receiver type (e.g. Flink Row, JDBC ResultSet or other non-standard containers).
+     * The list is iterated in insertion order; the first handler whose binding class is
+     * assignable from the bean's class is considered authoritative.
      */
-    private final Map<Class<?>, ExtendFieldHandler> fieldHandlers = new ConcurrentHashMap<>();
+    private final List<ExtendFieldHandlerHolder> fieldHandlers = new CopyOnWriteArrayList<>();
 
     public ReflectLoader(QLSecurityStrategy securityStrategy, boolean allowPrivateAccess) {
         this.securityStrategy = securityStrategy;
@@ -70,13 +71,17 @@ public class ReflectLoader {
      * Register a custom field-access handler bound to {@code bindingClass}, used to access
      * fields of non-standard containers (e.g. Flink Row, JDBC ResultSet or user-defined
      * MapLike/CollectionLike) during the field-access stage of a QL expression.
-     * The handler is invoked only when the bean is assignable to {@code bindingClass}.
+     * <p>
+     * Once the bean is assignable to {@code bindingClass}, the handler becomes the authoritative
+     * source for that bean's fields: whatever it returns (including {@code null}) is taken as the
+     * field value. Handlers are consulted in registration order, so an earlier registration for an
+     * assignable type wins.
      *
      * @param bindingClass the receiver type the handler is bound to
      * @param fieldHandler the field-access handler
      */
     public void addExtendFieldHandler(Class<?> bindingClass, ExtendFieldHandler fieldHandler) {
-        fieldHandlers.put(bindingClass, fieldHandler);
+        fieldHandlers.add(new ExtendFieldHandlerHolder(bindingClass, fieldHandler));
     }
 
     public Constructor<?> loadConstructor(Class<?> cls, Class<?>[] paramTypes) {
@@ -133,21 +138,20 @@ public class ReflectLoader {
     }
 
     /**
-     * Dispatch the field access to a user-registered handler whose binding class is assignable
-     * from the bean's class. Returns {@code null} when no handler matches or the matched handler
-     * yields {@code null}, so that the caller falls back to the default reflection logic.
+     * Dispatch the field access to the first user-registered handler whose binding class is
+     * assignable from the bean's class. Such a handler is authoritative for the bean type, so its
+     * result is wrapped and returned even when it is {@code null} (meaning the field value itself
+     * is {@code null}). Returns {@code null} only when no handler's binding class matches, so that
+     * the caller falls back to the default field-access logic.
      */
     private Value loadExtendField(Object bean, String fieldName) {
         if (fieldHandlers.isEmpty()) {
             return null;
         }
         Class<?> beanClass = bean.getClass();
-        for (Map.Entry<Class<?>, ExtendFieldHandler> entry : fieldHandlers.entrySet()) {
-            if (entry.getKey().isAssignableFrom(beanClass)) {
-                Object value = entry.getValue().getField(bean, fieldName);
-                if (value != null) {
-                    return new DataValue(value);
-                }
+        for (ExtendFieldHandlerHolder holder : fieldHandlers) {
+            if (holder.getBindingClass().isAssignableFrom(beanClass)) {
+                return new DataValue(holder.getHandler().getField(bean, fieldName));
             }
         }
         return null;
@@ -415,6 +419,28 @@ public class ReflectLoader {
         }
     }
     
+    /**
+     * Binds an {@link ExtendFieldHandler} to the receiver type it handles.
+     */
+    private static class ExtendFieldHandlerHolder {
+        private final Class<?> bindingClass;
+
+        private final ExtendFieldHandler handler;
+
+        private ExtendFieldHandlerHolder(Class<?> bindingClass, ExtendFieldHandler handler) {
+            this.bindingClass = bindingClass;
+            this.handler = handler;
+        }
+
+        public Class<?> getBindingClass() {
+            return bindingClass;
+        }
+
+        public ExtendFieldHandler getHandler() {
+            return handler;
+        }
+    }
+
     private static class FieldReflectCache {
         private final BiFunction<ErrorReporter, Object, Supplier<Object>> getterSupplier;
         

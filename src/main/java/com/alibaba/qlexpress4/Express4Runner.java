@@ -522,6 +522,10 @@ public class Express4Runner {
      * Register a custom field-access handler bound to {@code bindingClass}, used to access
      * fields of non-standard containers (e.g. Flink Row, JDBC ResultSet) with the regular
      * {@code obj.fieldName} syntax. Delegates to {@link ReflectLoader#addExtendFieldHandler}.
+     * <p>
+     * Once a bean is assignable to {@code bindingClass} the handler is authoritative for its
+     * fields: its return value (including {@code null}) is taken as the field value rather than
+     * falling back to Java reflection.
      *
      * @param bindingClass the receiver type the handler is bound to
      * @param fieldHandler the field-access handler
